@@ -3,8 +3,10 @@ package latex
 import (
 	"bytes"
 	_ "embed"
+	"fmt"
 	"io"
 	"strconv"
+	"strings"
 	"unicode"
 	"unicode/utf8"
 
@@ -96,14 +98,21 @@ func (r *Renderer) RegisterFuncs(reg renderer.NodeRendererFuncRegisterer) {
 func (r *Renderer) renderDocument(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if !entering {
 		// End of program.
+		comment(w, "end of document")
 		w.WriteString("\n\\end{document}\n")
 		return ast.WalkStop, nil
 	}
 
+	comment(w, "start of document")
+
 	if r.Config.Preamble == nil {
+		comment(w, "default preamble start")
 		w.Write(defaultPreamble)
+		comment(w, "default preamble end")
 	} else {
+		comment(w, "custom preamble start")
 		w.Write(r.Config.Preamble)
+		comment(w, "custom preamble end")
 	}
 	if r.Config.DeclareUnicode != nil {
 		_ = w.WriteByte('\n')
@@ -157,6 +166,7 @@ func (r *Renderer) renderHeading(w util.BufWriter, source []byte, node ast.Node,
 	if entering {
 		headingLevel := max(0, min(6, r.Config.HeadingLevelOffset+n.Level-1))
 		start := headingTable[headingLevel][bool2int(r.Config.NoHeadingNumbering)]
+		comment(w, "heading start - level %d, start: %d", headingLevel, start)
 		_ = w.WriteByte('\n')
 		_, _ = w.Write(start)
 		if headingLevel >= 5 {
@@ -164,6 +174,7 @@ func (r *Renderer) renderHeading(w util.BufWriter, source []byte, node ast.Node,
 			w.WriteByte('\n')
 		}
 	} else {
+		comment(w, "heading end")
 		_ = w.WriteByte('}')
 	}
 	return ast.WalkContinue, nil
@@ -180,11 +191,15 @@ func (r *Renderer) renderBlockquote(w util.BufWriter, source []byte, n ast.Node,
 
 func (r *Renderer) renderCodeBlock(w util.BufWriter, source []byte, n ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
-		_, _ = w.Write(blockCodeStart)
+		comment(w, "code block start")
+		//_, _ = w.Write(blockCodeStart)
+		w.Write([]byte("\\begin{minted}{go}\n"))
 		_ = w.WriteByte('\n')
 		r.writeRawLines(w, source, n)
 	} else {
-		_, _ = w.Write(blockCodeEnd)
+		w.Write([]byte("\\end{minted}\n"))
+		// _, _ = w.Write(blockCodeEnd)
+		comment(w, "code block end")
 	}
 	return ast.WalkContinue, nil
 }
@@ -192,19 +207,24 @@ func (r *Renderer) renderCodeBlock(w util.BufWriter, source []byte, n ast.Node, 
 func (r *Renderer) renderFencedCodeBlock(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	n := node.(*ast.FencedCodeBlock)
 	if entering {
-		_, _ = w.Write(blockCodeStart)
+		comment(w, "code fenced block start")
+		//_, _ = w.Write(blockCodeStart)
+		w.Write([]byte("\\begin{minted}"))
 		language := n.Language(source)
 		language = language[:min(10, len(language))]
 		_, supported := supportedLang[string(language)]
 		if language != nil && supported {
-			_, _ = w.WriteString("[language=")
-			escapeLaTeX(w, language)
-			_ = w.WriteByte(']')
+			// _, _ = w.WriteString("[language=")
+			// escapeLaTeX(w, language)
+			// _ = w.WriteByte(']')
+			w.WriteString(fmt.Sprintf("{%s}", string(language)))
 		}
 		_ = w.WriteByte('\n')
 		r.writeRawLines(w, source, n)
 	} else {
-		_, _ = w.Write(blockCodeEnd)
+		// _, _ = w.Write(blockCodeEnd)
+		w.Write([]byte("\\end{minted}\n"))
+		comment(w, "code fenced block end")
 	}
 	return ast.WalkContinue, nil
 }
@@ -248,14 +268,19 @@ func (r *Renderer) renderListItem(w util.BufWriter, source []byte, n ast.Node, e
 }
 
 func (r *Renderer) renderParagraph(w util.BufWriter, source []byte, n ast.Node, entering bool) (ast.WalkStatus, error) {
-	if !entering {
+	if entering {
+		comment(w, "paragraph start")
+	} else {
 		parent := n.Parent()
 		pkind := parent.Kind()
 		if pkind != ast.KindList && pkind != ast.KindListItem {
-			_, _ = w.Write(hardBreak)
+			// TODO: check if this really made sense
+			// _, _ = w.Write(hardBreak)
+			_, _ = w.Write([]byte("\n\\par\n"))
 		} else {
 			_, _ = w.WriteString("\n\n")
 		}
+		comment(w, "paragraph end")
 	}
 	return ast.WalkContinue, nil
 }
@@ -371,7 +396,51 @@ func (r *Renderer) renderLink(w util.BufWriter, source []byte, node ast.Node, en
 
 func (r *Renderer) renderImage(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	// No image rendering implemented yet.
-	w.WriteString("\n% goldmark-latex: image rendering unsupported as of yet\n")
+	if !entering {
+		return ast.WalkContinue, nil
+	}
+	n := node.(*ast.Image)
+	w.WriteString(fmt.Sprintf("\n%% goldmark-latex: destination: %s, title: %s \n", string(n.Destination), string(n.Title)))
+
+	tokens := strings.Split(string(n.Destination), "?")
+	path := tokens[0]
+	attributes := map[string]string{}
+	if len(tokens) > 1 {
+		tokens := strings.Split(tokens[1], "&")
+		for _, token := range tokens {
+			t := strings.Split(token, "=")
+			if len(t) != 2 {
+				w.WriteString(fmt.Sprintf("\n%% goldmark-latex: image %s has invalid attribute %s\n", path, token))
+				continue
+			}
+			switch t[0] {
+			case "width", "label":
+				attributes[t[0]] = t[1]
+			case "caption":
+				attributes["caption"] = strings.ReplaceAll(t[1], "%20", " ")
+			default:
+				w.WriteString(fmt.Sprintf("\n%% goldmark-latex: image %s has unsupported attribute %s\n", path, t[0]))
+			}
+		}
+	}
+
+	w.WriteString(
+		fmt.Sprintf(
+			"\\begin{figure}[h]\n\t\\centering\n\t\\includegraphics[width=%s\\textwidth]{%s}\n\t\\caption{%s}\n\t\\label {%s}\n\\end{figure}\n",
+			attributes["width"],
+			path,
+			attributes["caption"],
+			attributes["label"],
+		),
+	)
+
+	// 	\begin{figure}[h]
+	//     \centering
+	//     \includegraphics[width=0.75\textwidth]{mesh}
+	//     \caption{A nice plot.}
+	//     \label{fig:mesh1}
+	// \end{figure}
+	//w.WriteString(fmt.Sprintf("\\includegraphics{%s}\n", string(n.Destination)))
 	return ast.WalkSkipChildren, nil
 }
 
@@ -632,4 +701,8 @@ var supportedLang = map[string]struct{}{
 	"xslt":        {},
 	"ant":         {},
 	"xml":         {},
+}
+
+func comment(w util.BufWriter, format string, args ...any) {
+	w.WriteString(fmt.Sprintf("%% goldmark-latex: %s\n", fmt.Sprintf(format, args...)))
 }

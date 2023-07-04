@@ -1,4 +1,4 @@
-module github.com/soypat/goldmark-latex
+module github.com/dihedron/goldmark-latex
 
 go 1.19
 

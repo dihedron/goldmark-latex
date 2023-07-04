@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	latex "github.com/soypat/goldmark-latex"
+	latex "github.com/dihedron/goldmark-latex"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/renderer"
 	"github.com/yuin/goldmark/util"
