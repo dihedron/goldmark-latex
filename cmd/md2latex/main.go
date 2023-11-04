@@ -98,12 +98,19 @@ func renderGoldmark(input []byte) ([]byte, error) {
 		verb("using html renderer")
 		rd = goldmark.DefaultRenderer()
 	} else {
-		rd = renderer.NewRenderer(renderer.WithNodeRenderers(util.Prioritized(latex.NewRenderer(latex.Config{
-			NoHeadingNumbering: unhead,
-			Unsafe:             unsafe,
-			Preamble:           preamble,
-			HeadingLevelOffset: headingOffset,
-		}), 1000)))
+		rd = renderer.NewRenderer(
+			renderer.WithNodeRenderers(
+				util.Prioritized(
+					latex.NewRenderer(
+						latex.WithNoHeadingNumbering(unhead),
+						latex.WithRenderUnsafeElements(unsafe),
+						latex.WithPreamble(preamble),
+						latex.WithHeadingLevelOffset(headingOffset),
+					),
+					1000,
+				),
+			),
+		)
 	}
 	md := goldmark.New(goldmark.WithRenderer(rd))
 	var b bytes.Buffer

@@ -5,6 +5,8 @@ import (
 	_ "embed"
 	"fmt"
 	"io"
+	"log"
+	"os"
 	"strconv"
 	"strings"
 	"unicode"
@@ -16,8 +18,9 @@ import (
 	"github.com/yuin/goldmark/util"
 )
 
-// Config contains parameters for controlling LaTeX output of a Renderer.
-type Config struct {
+// Renderer is a LaTeX renderer implementation for extending
+// goldmark to generate .tex files.
+type Renderer struct {
 	// Increase heading levels: if the offset is 1, \section (1) becomes \subsection (2) etc.
 	// Negative offset is also valid.
 	// Resulting levels are clipped between 1 and 6.
@@ -33,40 +36,85 @@ type Config struct {
 	// Declares all used unicode characters in the preamble
 	// and replaces them with the result of this function.
 	DeclareUnicode func(rune) (raw string, isReplaced bool)
+	// makeTitle determines whether a \maketitle will be injected at the beginning of the document.
+	makeTitle bool
 }
 
-// SetLatexOption implements the Option interface.
-func (r Config) SetLatexOption(c *Config) { *c = r }
-
-// Renderer is a LaTeX renderer implementation for extending
-// goldmark to generate .tex files.
-type Renderer struct {
-	Config Config
-}
-
-// An Option interface sets options for HTML based renderers.
-type Option interface {
-	SetLatexOption(*Config)
-}
+// Option is the type for functional options.
+type Option func(*Renderer)
 
 // NewRenderer returns a new Renderer with given options.
 // Options are applied in order of appearance.
 // Example:
 //
-//	lr := latex.NewRenderer(latex.Config{
-//		Unsafe: true, // Add desired configuration options.
-//	})
+//	lr := latex.NewRenderer(
+//			latex.WithRenderUNsafeElements(true),
+//			// ... add more desired configuration options
+//	)
 //	r := renderer.NewRenderer(renderer.WithNodeRenderers(util.Prioritized(lr, 1000)))
 //	md := goldmark.New(goldmark.WithRenderer(r))
 //	md.Convert(markdown, LaTeXoutput)
-func NewRenderer(opts ...Option) renderer.NodeRenderer {
-	r := &Renderer{
-		Config: Config{},
-	}
-	for _, opt := range opts {
-		opt.SetLatexOption(&r.Config)
+func NewRenderer(options ...Option) *Renderer {
+	r := &Renderer{}
+	for _, option := range options {
+		option(r)
 	}
 	return r
+}
+
+func WithMakeTitle(value bool) Option {
+	return func(r *Renderer) {
+		r.makeTitle = value
+	}
+}
+
+func WithHeadingLevelOffset(offset int) Option {
+	return func(r *Renderer) {
+		r.HeadingLevelOffset = offset
+	}
+}
+
+func WithNoHeadingNumbering(nonumbering bool) Option {
+	return func(r *Renderer) {
+		r.NoHeadingNumbering = nonumbering
+	}
+}
+
+func WithPreamble(preamble []byte) Option {
+	return func(r *Renderer) {
+		r.Preamble = preamble
+	}
+}
+
+func WithPreambleFile(path string) Option {
+	return func(r *Renderer) {
+		var p *os.File
+		var err error
+		if p, err = os.Open(path); err != nil {
+			// TODO: do not panic
+			log.Fatalf("error opening preamble file: %v", err)
+		}
+		defer p.Close()
+
+		preamble, err := io.ReadAll(p)
+		if err != nil {
+			// TODO: do not panic
+			log.Fatalf("error reading preamble file: %v", err)
+		}
+		r.Preamble = preamble
+	}
+}
+
+func WithRenderUnsafeElements(unsafe bool) Option {
+	return func(r *Renderer) {
+		r.Unsafe = unsafe
+	}
+}
+
+func WithUnicodeCharactersMapping(mapping func(rune) (raw string, isReplaced bool)) Option {
+	return func(r *Renderer) {
+		r.DeclareUnicode = mapping
+	}
 }
 
 // RegisterFuncs implements goldmark's renderer.NodeRenderer interface.
@@ -105,16 +153,16 @@ func (r *Renderer) renderDocument(w util.BufWriter, source []byte, node ast.Node
 
 	comment(w, "start of document")
 
-	if r.Config.Preamble == nil {
+	if r.Preamble == nil {
 		comment(w, "default preamble start")
 		w.Write(defaultPreamble)
 		comment(w, "default preamble end")
 	} else {
 		comment(w, "custom preamble start")
-		w.Write(r.Config.Preamble)
+		w.Write(r.Preamble)
 		comment(w, "custom preamble end")
 	}
-	if r.Config.DeclareUnicode != nil {
+	if r.DeclareUnicode != nil {
 		_ = w.WriteByte('\n')
 		const unicodeDecl = "\\DeclareUnicodeCharacter{"
 		const zeropad = "00"
@@ -131,7 +179,7 @@ func (r *Renderer) renderDocument(w util.BufWriter, source []byte, node ast.Node
 				continue
 			}
 			declared[char] = struct{}{}
-			replace, ok := r.Config.DeclareUnicode(char)
+			replace, ok := r.DeclareUnicode(char)
 			if !ok {
 				continue
 			}
@@ -145,6 +193,9 @@ func (r *Renderer) renderDocument(w util.BufWriter, source []byte, node ast.Node
 		}
 	}
 	w.WriteString("\n\\begin{document}\n")
+	if r.makeTitle {
+		w.WriteString("\\maketitle\n")
+	}
 	return ast.WalkContinue, nil
 }
 
@@ -164,18 +215,18 @@ func DefaultPreamble() []byte {
 func (r *Renderer) renderHeading(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	n := node.(*ast.Heading)
 	if entering {
-		headingLevel := max(0, min(6, r.Config.HeadingLevelOffset+n.Level-1))
-		start := headingTable[headingLevel][bool2int(r.Config.NoHeadingNumbering)]
-		comment(w, "heading start - level %d, start: %d", headingLevel, start)
-		_ = w.WriteByte('\n')
+		headingLevel := max(0, min(6, r.HeadingLevelOffset+n.Level-1))
+		start := headingTable[headingLevel][bool2int(r.NoHeadingNumbering)]
+		comment(w, "heading start - level %d, start: %v", headingLevel, start)
+		// _ = w.WriteByte('\n')
 		_, _ = w.Write(start)
 		if headingLevel >= 5 {
 			// _, _ = w.Write(softBreak)
 			w.WriteByte('\n')
 		}
 	} else {
+		_, _ = w.Write([]byte{'}', '\n'})
 		comment(w, "heading end")
-		_ = w.WriteByte('}')
 	}
 	return ast.WalkContinue, nil
 }
@@ -269,17 +320,22 @@ func (r *Renderer) renderListItem(w util.BufWriter, source []byte, n ast.Node, e
 
 func (r *Renderer) renderParagraph(w util.BufWriter, source []byte, n ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
-		comment(w, "paragraph start")
-	} else {
+		comment(w, fmt.Sprintf("paragraph start (type: %T)", n))
+		// paragraph := n.(*ast.Paragraph)
+
 		parent := n.Parent()
 		pkind := parent.Kind()
 		if pkind != ast.KindList && pkind != ast.KindListItem {
 			// TODO: check if this really made sense
 			// _, _ = w.Write(hardBreak)
-			_, _ = w.Write([]byte("\n\\par\n"))
+			// _, _ = w.Write([]byte("\n\\par\n"))
+			_, _ = w.Write([]byte("\n"))
+			// _, _ = w.Write(softBreak)
 		} else {
-			_, _ = w.WriteString("\n\n")
+			// _, _ = w.WriteString("\n")
 		}
+	} else {
+		_, _ = w.WriteString("\n")
 		comment(w, "paragraph end")
 	}
 	return ast.WalkContinue, nil
@@ -383,7 +439,7 @@ func (r *Renderer) renderLink(w util.BufWriter, source []byte, node ast.Node, en
 	n := node.(*ast.Link)
 	if entering {
 		_, _ = w.WriteString(`\href{`)
-		if r.Config.Unsafe || !html.IsDangerousURL(n.Destination) {
+		if r.Unsafe || !html.IsDangerousURL(n.Destination) {
 			escapeLaTeX(w, n.Destination)
 			// _, _ = w.Write(util.EscapeHTML(util.URLEscape(n.Destination, true)))
 		}
@@ -452,8 +508,10 @@ func (r *Renderer) renderRawHTML(w util.BufWriter, source []byte, node ast.Node,
 
 func (r *Renderer) renderText(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if !entering {
+		// comment(w, "render text end")
 		return ast.WalkContinue, nil
 	}
+	// comment(w, "render text start")
 	n := node.(*ast.Text)
 	segment := n.Segment.Value(source)
 	if n.IsRaw() {
@@ -497,7 +555,7 @@ func (r *Renderer) writeRawLines(w util.BufWriter, source []byte, n ast.Node) {
 	for i := 0; i < l; i++ {
 		line := n.Lines().At(i)
 		text := line.Value(source)
-		if r.Config.Unsafe || !bytes.Contains(text, endCmdPrefix) {
+		if r.Unsafe || !bytes.Contains(text, endCmdPrefix) {
 			_, _ = w.Write(text)
 		} else {
 			_, _ = w.WriteString("% goldmark-latex: Skipped following line due to possibly unsafe content:\n%")
